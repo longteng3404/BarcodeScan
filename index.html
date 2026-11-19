@@ -75,6 +75,11 @@ dd.txt{font-family:var(--sans)}
 .empty{color:var(--muted);font-size:14px;padding:14px 16px}
 .small{font-size:13px;min-height:36px!important;padding:6px 12px!important}
 .note{font-size:13px;color:var(--muted);margin:0}
+.camtools{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:-6px}
+.zoom{display:flex;align-items:center;gap:10px;flex:1;min-width:0;font-size:14px;color:var(--muted)}
+.zoom input{flex:1;min-width:0;accent-color:var(--accent)}
+.zv{font-family:var(--mono);font-size:13px;min-width:3.2em;text-align:right;font-variant-numeric:tabular-nums}
+#torch[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
 </style>
 
 <div class="wrap">
@@ -94,6 +99,11 @@ dd.txt{font-family:var(--sans)}
       <div class="reticle" id="reticle" hidden></div>
     </div>
   </section>
+
+  <div class="camtools" id="camTools" hidden>
+    <label class="zoom" id="zoomWrap" for="zoom" hidden>放大 <input type="range" id="zoom" min="1" max="4" step="0.1" value="1"> <span id="zoomVal" class="zv">1.0×</span></label>
+    <button type="button" class="small" id="torch" hidden>手電筒</button>
+  </div>
 
   <div class="actions">
     <button class="primary" id="liveBtn" type="button">即時掃描</button>
@@ -118,7 +128,8 @@ dd.txt{font-family:var(--sans)}
   </section>
 </div>
 
-<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>window.ZXing||document.write('<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"><\/script>')</script>
 <script>
 (function(){
 const $=id=>document.getElementById(id);
@@ -287,7 +298,7 @@ function drawTo(src,sw,sh,maxW,rot){
 async function decodeImage(img){
   const sw=img.naturalWidth,sh=img.naturalHeight;
   if(native){try{const r=await native.detect(img);if(r&&r[0])return r[0].rawValue}catch(e){}}
-  for(const size of [1600,1000,2400]){for(const rot of [false,true]){
+  for(const size of [1600,1000,2400,700]){for(const rot of [false,true]){
     const t=zxingCanvas(drawTo(img,sw,sh,size,rot));if(t)return t;
     await new Promise(r=>setTimeout(r,0));
   }}
@@ -312,47 +323,78 @@ $("file").addEventListener("change",async e=>{
 });
 
 /* ---------- live mode ---------- */
-let stream=null,running=false,lastText="",hits=0,lastTry=0;
+let stream=null,track=null,running=false,busy=false,lastTry=0,frames=0;
+const engineName=()=>native?"系統內建＋ZXing":(Z?"ZXing":"無辨識元件");
 async function startLive(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){setStatus("這個瀏覽器不支援即時相機，請用「拍照辨識」。",true);return}
+  const base={facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}};
   try{
-    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:false});
+    try{stream=await navigator.mediaDevices.getUserMedia({video:Object.assign({},base,{advanced:[{focusMode:"continuous"}]}),audio:false})}
+    catch(e1){if(e1&&e1.name==="NotAllowedError")throw e1;stream=await navigator.mediaDevices.getUserMedia({video:base,audio:false})}
   }catch(err){
     setStatus(err&&err.name==="NotAllowedError"
-      ?"無法開啟相機：權限被拒絕，或這個頁面所在的環境不允許使用相機。請改用「拍照辨識」，或把網頁放到自己的 https 網址上使用。"
+      ?"無法開啟相機：權限被拒絕，或這個頁面所在的環境不允許使用相機。請到瀏覽器設定允許相機，或改用「拍照辨識」。"
       :"無法開啟相機（"+(err&&err.name||"未知錯誤")+"）。請改用「拍照辨識」。",true);
     return;
   }
+  track=stream.getVideoTracks()[0];
   video.srcObject=stream;try{await video.play()}catch(e){}
   idle.hidden=true;photo.hidden=true;video.hidden=false;reticle.hidden=false;
-  $("liveBtn").textContent="停止掃描";running=true;lastText="";hits=0;
-  setStatus("把條碼對準紅線，保持 15–25 公分距離");
+  setupTools();
+  $("liveBtn").textContent="停止掃描";running=true;busy=false;frames=0;
+  setStatus("把條碼放進框內，手機離條碼約 15–25 公分，等畫面清楚對焦");
   requestAnimationFrame(loop);
 }
+function setupTools(){
+  let caps={};try{caps=track&&track.getCapabilities?track.getCapabilities():{}}catch(e){}
+  const zr=$("zoom");let any=false;
+  if(caps.zoom&&caps.zoom.max>caps.zoom.min){
+    zr.min=caps.zoom.min;zr.max=Math.min(caps.zoom.max,8);zr.step=caps.zoom.step||0.1;
+    const start=Math.min(Math.max(2,caps.zoom.min),+zr.max);
+    zr.value=start;applyZoom(start);$("zoomWrap").hidden=false;any=true;
+  }else $("zoomWrap").hidden=true;
+  const tb=$("torch");tb.setAttribute("aria-pressed","false");
+  if(caps.torch){tb.hidden=false;any=true}else tb.hidden=true;
+  $("camTools").hidden=!any;
+}
+function applyZoom(v){
+  $("zoomVal").textContent=(+v).toFixed(1)+"×";
+  if(track)track.applyConstraints({advanced:[{zoom:+v}]}).catch(()=>{});
+}
+$("zoom").addEventListener("input",e=>applyZoom(e.target.value));
+$("torch").addEventListener("click",()=>{
+  const tb=$("torch");const on=tb.getAttribute("aria-pressed")!=="true";
+  if(track)track.applyConstraints({advanced:[{torch:on}]}).then(()=>tb.setAttribute("aria-pressed",String(on))).catch(()=>setStatus("這支手機不讓網頁控制手電筒。",true));
+});
 function stopLive(){
   running=false;
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
-  video.srcObject=null;video.hidden=true;reticle.hidden=true;
+  track=null;video.srcObject=null;video.hidden=true;reticle.hidden=true;$("camTools").hidden=true;
   if(photo.hidden)idle.hidden=false;
   $("liveBtn").textContent="即時掃描";
 }
+async function scanFrame(n){
+  const vw=video.videoWidth,vh=video.videoHeight;if(!vw||!vh)return null;
+  if(native){try{const r=await native.detect(video);if(r&&r[0])return r[0].rawValue}catch(e){}}
+  if(!Z)return null;
+  const mode=n%3;
+  if(mode===0){
+    // middle band where the frame is drawn
+    const cw=Math.round(vw*0.92),ch=Math.round(vh*0.5),cx=Math.round((vw-cw)/2),cy=Math.round((vh-ch)/2);
+    const s=Math.min(1,1280/cw);work.width=Math.round(cw*s);work.height=Math.round(ch*s);
+    wctx.drawImage(video,cx,cy,cw,ch,0,0,work.width,work.height);
+  }else drawTo(video,vw,vh,1280,mode===2); // whole frame, and rotated for vertical barcodes
+  return zxingCanvas(work);
+}
 async function loop(ts){
   if(!running)return;
-  if(ts-lastTry>140&&video.readyState>=2){
-    lastTry=ts;
-    const vw=video.videoWidth,vh=video.videoHeight;
-    // crop the middle band where the reticle is
-    const cw=Math.round(vw*0.9),ch=Math.round(vh*0.45),cx=Math.round((vw-cw)/2),cy=Math.round((vh-ch)/2);
-    const scale=Math.min(1,1100/cw);
-    work.width=Math.round(cw*scale);work.height=Math.round(ch*scale);
-    wctx.drawImage(video,cx,cy,cw,ch,0,0,work.width,work.height);
-    let t=null;
-    if(native){try{const r=await native.detect(work);if(r&&r[0])t=r[0].rawValue}catch(e){}}
-    if(!t)t=zxingCanvas(work);
-    if(t){
-      if(t===lastText)hits++;else{lastText=t;hits=1}
-      if(hits>=2&&eanValid(t.replace(/\D/g,""))){accept(t,"即時");stopLive();return}
-    }
+  if(!busy&&ts-lastTry>110&&video.readyState>=2){
+    busy=true;lastTry=ts;frames++;
+    let t=null;try{t=await scanFrame(frames)}catch(e){}
+    busy=false;
+    if(!running)return;
+    if(t){const d=String(t).replace(/\D/g,"");if(eanValid(d)){accept(d,"即時");stopLive();return}}
+    if(frames%15===0)setStatus(`掃描中…已分析 ${frames} 張畫面（${engineName()}，${video.videoWidth}×${video.videoHeight}）。畫面模糊的話，把手機拉遠一點或調大「放大」。`);
   }
   requestAnimationFrame(loop);
 }
